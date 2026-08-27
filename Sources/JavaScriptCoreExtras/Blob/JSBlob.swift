@@ -1,4 +1,5 @@
 @preconcurrency import JavaScriptCore
+import Foundation
 
 // MARK: - JSBlob
 
@@ -76,7 +77,7 @@
     self.mimeType = type
     self.indexedStorage = IndexedStorage(
       startIndex: 0,
-      endIndex: storage.utf8SizeInBytes,
+      endIndex: storage.byteCount,
       storage: storage
     )
   }
@@ -112,6 +113,11 @@ extension JSBlob {
   public func utf8(context: JSContext) async throws -> String.UTF8View {
     try await self.indexedStorage.utf8(context: context)
   }
+
+  /// Returns the raw bytes from this blob.
+  public func data(context: JSContext) async throws -> Data {
+    try await self.indexedStorage.bytes(context: context)
+  }
 }
 
 // MARK: - JSExport Conformance
@@ -124,22 +130,22 @@ extension JSBlob: JSBlobExport {
 
   /// The size (in bytes) of this blob.
   public var size: Int64 {
-    self.indexedStorage.storage.utf8SizeInBytes
+    self.indexedStorage.endIndex - self.indexedStorage.startIndex
   }
 
   /// Returns the text of this blob as a `JSValue`.
   public func text() -> JSValue {
-    self.utf8Promise { utf8, _ in String(utf8) }.value
+    self.bytesPromise { data, _ in String(decoding: data, as: UTF8.self) }.value
   }
 
   /// Returns the bytes of this blob as a `JSValue`.
   public func bytes() -> JSValue {
-    self.utf8Promise { bufferWithBytes(utf8: $0, in: $1).1 }.value
+    self.bytesPromise { bufferWithBytes(data: $0, in: $1).1 }.value
   }
 
   /// Returns a Javascript `ArrayBuffer` of this blob as a `JSValue`.
   public func arrayBuffer() -> JSValue {
-    self.utf8Promise { bufferWithBytes(utf8: $0, in: $1).0 }.value
+    self.bytesPromise { bufferWithBytes(data: $0, in: $1).0 }.value
   }
 
   /// The implementation of Javascript's `Blob.slice`.
@@ -161,6 +167,16 @@ extension JSBlob: JSBlobExport {
       Task { await indexedStorage.utf8(continuation: continuation, executor: executor, map) }
     }
   }
+
+  private func bytesPromise(
+    _ map: @Sendable @escaping (Data, JSContext) -> Any?
+  ) -> JSPromise {
+    JSPromise(in: .current()) { continuation in
+      let executor = JSVirtualMachineExecutor.current()
+      let indexedStorage = self.indexedStorage
+      Task { await indexedStorage.bytes(continuation: continuation, executor: executor, map) }
+    }
+  }
 }
 
 // MARK: - Helpers
@@ -171,12 +187,18 @@ extension JSBlob {
     var endIndex: Int64
     let storage: any JSBlobStorage
 
-    func utf8(context: JSContext) async throws(JSValueError) -> String.UTF8View {
-      try await self.storage.utf8Bytes(
+    var size: Int64 { self.endIndex - self.startIndex }
+
+    func bytes(context: JSContext) async throws(JSValueError) -> Data {
+      try await self.storage.bytes(
         startIndex: self.startIndex,
         endIndex: self.endIndex,
         context: context
       )
+    }
+
+    func utf8(context: JSContext) async throws(JSValueError) -> String.UTF8View {
+      String(decoding: try await self.bytes(context: context), as: UTF8.self).utf8
     }
 
     func utf8(
@@ -186,6 +208,32 @@ extension JSBlob {
     ) async {
       do {
         let result = map(try await self.utf8(context: continuation.context), continuation.context)
+        if let executor {
+          nonisolated(unsafe) let capturedResult = result
+          await executor.withVirtualMachine { _ in
+            continuation.resume(resolving: capturedResult)
+          }
+        } else {
+          continuation.resume(resolving: result)
+        }
+      } catch {
+        if let executor {
+          await executor.withVirtualMachine { _ in
+            continuation.resume(rejecting: error.value)
+          }
+        } else {
+          continuation.resume(rejecting: error.value)
+        }
+      }
+    }
+
+    func bytes(
+      continuation: JSPromise.Continuation,
+      executor: JSVirtualMachineExecutor?,
+      _ map: (Data, JSContext) -> Any?
+    ) async {
+      do {
+        let result = map(try await self.bytes(context: continuation.context), continuation.context)
         if let executor {
           nonisolated(unsafe) let capturedResult = result
           await executor.withVirtualMachine { _ in
@@ -226,6 +274,18 @@ extension JSValue {
     }
     return results
   }
+}
+
+private func bufferWithBytes(
+  data: Data,
+  in context: JSContext
+) -> (JSValue, JSValue) {
+  let bytes = context.objectForKeyedSubscript("Uint8Array")
+    .construct(withArguments: [data.count])!
+  for (index, byte) in data.enumerated() {
+    bytes.setValue(byte, at: index)
+  }
+  return (bytes.objectForKeyedSubscript("buffer")!, bytes)
 }
 
 private func bufferWithBytes(

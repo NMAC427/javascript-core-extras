@@ -158,21 +158,22 @@ extension JSFile: JSFileExport {
 
 private struct FileJSBlobStorage: JSBlobStorage {
   let lastModified: Date
-  let utf8SizeInBytes: Int64
+  let byteCount: Int64
+  var utf8SizeInBytes: Int64 { self.byteCount }
   private let url: URL
 
   init(url: URL) throws {
     let values = try url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
-    self.utf8SizeInBytes = Int64(values.fileSize ?? 0)
+    self.byteCount = Int64(values.fileSize ?? 0)
     self.lastModified = values.contentModificationDate ?? Date()
     self.url = url
   }
 
-  func utf8Bytes(
+  func bytes(
     startIndex: Int64,
     endIndex: Int64,
     context: JSContext
-  ) throws(JSValueError) -> String.UTF8View {
+  ) async throws(JSValueError) -> Data {
     do {
       let data = try NSFileCoordinator()
         .coordinate(readingItemAt: self.url) { url in
@@ -182,12 +183,21 @@ private struct FileJSBlobStorage: JSBlobStorage {
             count: UInt64(endIndex - startIndex)
           )
         }
-      return String(decoding: data, as: UTF8.self).utf8
+      return data
     } catch {
       throw JSValueError(
         value: JSValue(newErrorFromMessage: error.localizedDescription, in: context)
       )
     }
+  }
+
+  func utf8Bytes(
+    startIndex: Int64,
+    endIndex: Int64,
+    context: JSContext
+  ) async throws(JSValueError) -> String.UTF8View {
+    let data = try await self.bytes(startIndex: startIndex, endIndex: endIndex, context: context)
+    return String(decoding: data, as: UTF8.self).utf8
   }
 }
 

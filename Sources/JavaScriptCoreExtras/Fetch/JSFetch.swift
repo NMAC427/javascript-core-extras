@@ -348,17 +348,19 @@ extension JSURLSessionDataDelegate {
 private final class JSFetchResponseBlobStorage: JSBlobStorage {
   private enum DataStorage {
     case deferred(BodyCollector, size: Int64)
-    case provided(String)
+    case provided(Data)
   }
 
   private let storage: DataStorage
 
-  var utf8SizeInBytes: Int64 {
+  var byteCount: Int64 {
     switch self.storage {
     case .deferred(_, let size): size
     case .provided(let data): Int64(data.count)
     }
   }
+
+  var utf8SizeInBytes: Int64 { self.byteCount }
 
   static func deferred(contentLength: Int64, collector: BodyCollector) -> Self {
     Self(storage: .deferred(collector, size: contentLength))
@@ -372,14 +374,14 @@ private final class JSFetchResponseBlobStorage: JSBlobStorage {
     self.storage = storage
   }
 
-  func utf8Bytes(
+  func bytes(
     startIndex: Int64,
     endIndex: Int64,
     context: JSContext
-  ) async throws(JSValueError) -> String.UTF8View {
+  ) async throws(JSValueError) -> Data {
     do {
-      return try await self.data()
-        .utf8Bytes(startIndex: startIndex, endIndex: endIndex, context: context)
+      let full = try await self.data()
+      return try await full.bytes(startIndex: startIndex, endIndex: endIndex, context: context)
     } catch {
       throw JSValueError(
         value: JSValue(newErrorFromMessage: error.localizedDescription, in: context)
@@ -387,8 +389,23 @@ private final class JSFetchResponseBlobStorage: JSBlobStorage {
     }
   }
 
-  private func data() async throws -> String {
-    switch storage {
+  func utf8Bytes(
+    startIndex: Int64,
+    endIndex: Int64,
+    context: JSContext
+  ) async throws(JSValueError) -> String.UTF8View {
+    do {
+      let full = try await self.data()
+      return try await full.utf8Bytes(startIndex: startIndex, endIndex: endIndex, context: context)
+    } catch {
+      throw JSValueError(
+        value: JSValue(newErrorFromMessage: error.localizedDescription, in: context)
+      )
+    }
+  }
+
+  private func data() async throws -> Data {
+    switch self.storage {
     case .deferred(let collector, _): try await collector.collect()
     case .provided(let data): data
     }
@@ -407,9 +424,8 @@ private final class BodyCollector: Sendable {
     self.continuation = continuation
   }
 
-  func collect() async throws -> String {
-    let data = try await self.stream.reduce(into: Data()) { $0.append($1) }
-    return String(decoding: data, as: UTF8.self)
+  func collect() async throws -> Data {
+    try await self.stream.reduce(into: Data()) { $0.append($1) }
   }
 
   func push(data: Data) {
